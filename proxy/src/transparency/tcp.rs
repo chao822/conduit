@@ -71,13 +71,32 @@ impl Proxy {
         let fut = connect.connect()
             .map_err(|e| debug!("tcp connect error: {:?}", e))
             .and_then(move |tcp_out| {
+                use futures::future::Either;
+
                 let (in_r, in_w) = tcp_in.split();
                 let (out_r, out_w) = tcp_out.split();
 
                 copy(in_r, out_w)
-                    .join(copy(out_r, in_w))
-                    .map(|_| ())
-                    .map_err(|e| debug!("tcp error: {}", e))
+                    .select2(copy(out_r, in_w))
+                    .map(|_ok| {
+                        // at this point, 1 of the copies has finished
+                        // (seen eof on its reader), and so one side
+                        // has hung up. time to go!
+                        //
+                        // TODO: we could actually try to see if the other
+                        // 'copy' has some bytes it still wants to write,
+                        // and try to write them, but we cannot do that with
+                        // the current `Copy` API. We probably just want to
+                        // implement our own duplex pipe future instead.
+                        //
+                        // However, this case is very unlikely. It'd require
+                        // that one side has closed only their write-side of
+                        // the socket, and is still waiting to read.
+                    })
+                    .map_err(|e| match e {
+                        Either::A((err, _)) |
+                        Either::B((err, _)) => debug!("tcp error: {}", err),
+                    })
             });
         Box::new(fut)
     }
